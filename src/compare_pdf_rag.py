@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import json
 from pathlib import Path
 from typing import Iterable, List, Dict
 
@@ -190,6 +191,10 @@ def parse_args() -> argparse.Namespace:
         "--method", choices=["metadata", "mistral"], default="metadata",
         help="PDF ingestion strategy",
     )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="Optional path to write evaluation scores as JSON",
+    )
 
     return parser.parse_args()
 
@@ -208,9 +213,13 @@ def main() -> None:
     store = build_vector_store(text)
     outputs = answer_questions(store, questions)
     scores = evaluate_rag(outputs, truths)
-
     for metric, value in scores.items():
         print(f"{metric}: {value:.3f}")
+
+    # Write scores to disk for easier comparison between runs
+    output_path = args.output or Path("results") / f"{args.method}_scores.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(scores, indent=2))
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
