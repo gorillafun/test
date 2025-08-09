@@ -22,10 +22,10 @@ more sophisticated prompt templates.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Iterable, List, Dict
 
-from PyPDF2 import PdfReader
 
 # The heavy imports are placed inside functions so that basic help/compilation
 # works without the optional dependencies being installed.
@@ -42,14 +42,17 @@ def extract_metadata_text(pdf_path: Path) -> str:
     scanned documents where text is absent, the function will return an empty
     string.
     """
+    from PyPDF2 import PdfReader  # local import to avoid hard dependency
+
+
     reader = PdfReader(str(pdf_path))
     pieces: List[str] = []
     for page in reader.pages:
         pieces.append(page.extract_text() or "")
     return "\n".join(pieces)
 
+def extract_mistral_text(pdf_path: Path, api_key: str | None = None) -> str:
 
-def extract_mistral_text(pdf_path: Path, api_key: str) -> str:
     """Use `unstructured` and a Mistral model to obtain cleaned text.
 
     Parameters
@@ -57,10 +60,17 @@ def extract_mistral_text(pdf_path: Path, api_key: str) -> str:
     pdf_path:
         Path to the PDF file.
     api_key:
-        API key for the `mistralai` service or compatible deployment.
+        API key for the `mistralai` service or compatible deployment. If not
+        provided, the function looks up ``MISTRAL_API_KEY`` in the environment.
+
     """
     from unstructured.partition.pdf import partition_pdf
     from mistralai.client import MistralClient
+
+    api_key = api_key or os.getenv("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("MISTRAL_API_KEY environment variable is required")
+
 
     elements = partition_pdf(filename=str(pdf_path))
     client = MistralClient(api_key=api_key)
@@ -84,15 +94,22 @@ def extract_mistral_text(pdf_path: Path, api_key: str) -> str:
 # ---------------------------------------------------------------------------
 
 def build_vector_store(text: str):
-    """Create a FAISS vector store from raw text."""
+    """Create a FAISS vector store from raw text using Azure OpenAI embeddings."""
     from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.embeddings import HuggingFaceEmbeddings
+    from langchain.embeddings import AzureOpenAIEmbeddings
+
     from langchain.vectorstores import FAISS
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     docs = splitter.create_documents([text])
 
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embeddings = AzureOpenAIEmbeddings(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
+        azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"),
+    )
+
     return FAISS.from_documents(docs, embedding=embeddings)
 
 
@@ -106,7 +123,13 @@ def answer_questions(vector_store, questions: Iterable[str]) -> List[Dict[str, s
     from langchain.chains import RetrievalQA
     from langchain.llms import AzureOpenAI
 
-    llm = AzureOpenAI()  # expects Azure OpenAI environment variables
+    llm = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
+        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    )
+
     qa = RetrievalQA.from_chain_type(llm=llm, retriever=vector_store.as_retriever())
 
     results: List[Dict[str, str]] = []
@@ -138,7 +161,13 @@ def evaluate_rag(rag_outputs: List[Dict[str, str]], truths: List[str]) -> Dict[s
         "ground_truth": truths,
     })
 
-    llm = AzureOpenAI()  # used by ragas for scoring
+    llm = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
+        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    )
+
 
     result = evaluate(
         dataset,
@@ -157,10 +186,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("pdf", type=Path, help="Path to input PDF")
     parser.add_argument("questions", type=Path, help="Text file with one question per line")
     parser.add_argument("truths", type=Path, help="Text file with ground truth answers")
-    parser.add_argument("--mistral-api-key", dest="mistral_api_key", default=None,
-                        help="API key for Mistral when using structured extraction")
-    parser.add_argument("--method", choices=["metadata", "mistral"], default="metadata",
-                        help="PDF ingestion strategy")
+    parser.add_argument(
+        "--method", choices=["metadata", "mistral"], default="metadata",
+        help="PDF ingestion strategy",
+    )
+
     return parser.parse_args()
 
 
@@ -172,9 +202,8 @@ def main() -> None:
     if args.method == "metadata":
         text = extract_metadata_text(args.pdf)
     else:
-        if not args.mistral_api_key:
-            raise RuntimeError("--mistral-api-key is required for Mistral extraction")
-        text = extract_mistral_text(args.pdf, api_key=args.mistral_api_key)
+        text = extract_mistral_text(args.pdf)
+
 
     store = build_vector_store(text)
     outputs = answer_questions(store, questions)
