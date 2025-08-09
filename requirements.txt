@@ -1,0 +1,10 @@
+PyPDF2
+unstructured
+mistralai
+langchain
+faiss-cpu
+sentence-transformers
+ragas
+datasets
+openai
+jupyter
