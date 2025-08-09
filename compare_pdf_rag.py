@@ -26,8 +26,6 @@ import os
 from pathlib import Path
 from typing import Iterable, List, Dict
 
-from PyPDF2 import PdfReader
-
 # The heavy imports are placed inside functions so that basic help/compilation
 # works without the optional dependencies being installed.
 
@@ -43,6 +41,8 @@ def extract_metadata_text(pdf_path: Path) -> str:
     scanned documents where text is absent, the function will return an empty
     string.
     """
+    from PyPDF2 import PdfReader  # local import to avoid hard dependency
+
     reader = PdfReader(str(pdf_path))
     pieces: List[str] = []
     for page in reader.pages:
