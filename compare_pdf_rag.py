@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 from typing import Iterable, List, Dict
 
+
 # The heavy imports are placed inside functions so that basic help/compilation
 # works without the optional dependencies being installed.
 
@@ -43,6 +44,7 @@ def extract_metadata_text(pdf_path: Path) -> str:
     """
     from PyPDF2 import PdfReader  # local import to avoid hard dependency
 
+
     reader = PdfReader(str(pdf_path))
     pieces: List[str] = []
     for page in reader.pages:
@@ -50,6 +52,7 @@ def extract_metadata_text(pdf_path: Path) -> str:
     return "\n".join(pieces)
 
 def extract_mistral_text(pdf_path: Path, api_key: str | None = None) -> str:
+
     """Use `unstructured` and a Mistral model to obtain cleaned text.
 
     Parameters
@@ -59,6 +62,7 @@ def extract_mistral_text(pdf_path: Path, api_key: str | None = None) -> str:
     api_key:
         API key for the `mistralai` service or compatible deployment. If not
         provided, the function looks up ``MISTRAL_API_KEY`` in the environment.
+
     """
     from unstructured.partition.pdf import partition_pdf
     from mistralai.client import MistralClient
@@ -66,6 +70,7 @@ def extract_mistral_text(pdf_path: Path, api_key: str | None = None) -> str:
     api_key = api_key or os.getenv("MISTRAL_API_KEY")
     if not api_key:
         raise RuntimeError("MISTRAL_API_KEY environment variable is required")
+
 
     elements = partition_pdf(filename=str(pdf_path))
     client = MistralClient(api_key=api_key)
@@ -92,6 +97,7 @@ def build_vector_store(text: str):
     """Create a FAISS vector store from raw text using Azure OpenAI embeddings."""
     from langchain.text_splitter import RecursiveCharacterTextSplitter
     from langchain.embeddings import AzureOpenAIEmbeddings
+
     from langchain.vectorstores import FAISS
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
@@ -103,6 +109,7 @@ def build_vector_store(text: str):
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
         azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"),
     )
+
     return FAISS.from_documents(docs, embedding=embeddings)
 
 
@@ -122,6 +129,7 @@ def answer_questions(vector_store, questions: Iterable[str]) -> List[Dict[str, s
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
         deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
     )
+
     qa = RetrievalQA.from_chain_type(llm=llm, retriever=vector_store.as_retriever())
 
     results: List[Dict[str, str]] = []
@@ -160,6 +168,7 @@ def evaluate_rag(rag_outputs: List[Dict[str, str]], truths: List[str]) -> Dict[s
         deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
     )
 
+
     result = evaluate(
         dataset,
         metrics=[answer_relevancy, faithfulness],
@@ -181,6 +190,7 @@ def parse_args() -> argparse.Namespace:
         "--method", choices=["metadata", "mistral"], default="metadata",
         help="PDF ingestion strategy",
     )
+
     return parser.parse_args()
 
 
@@ -193,6 +203,7 @@ def main() -> None:
         text = extract_metadata_text(args.pdf)
     else:
         text = extract_mistral_text(args.pdf)
+
 
     store = build_vector_store(text)
     outputs = answer_questions(store, questions)
