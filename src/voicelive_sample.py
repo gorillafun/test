@@ -306,6 +306,55 @@ class PromptSequenceRunner:
             logger.debug("Returning Azure SDK ResponseCreateParams object")
         return {"response": response_obj}
 
+
+async def pump_until_done(connection: Any) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Drain events from the connection until a terminal signal is received.
+
+    The helper prints incremental deltas so the demo surfaces the model's
+    decision making process while returning the collected artefacts for further
+    handling by the caller.
+    """
+
+    def _maybe_get(event: Any, name: str) -> Any:
+        if hasattr(event, name):
+            return getattr(event, name)
+        if isinstance(event, Mapping):
+            return event.get(name)
+        return None
+
+    call_args: List[str] = []
+    text_chunks: List[str] = []
+    call_id: Optional[str] = None
+
+    while True:
+        event = await connection.recv()
+        event_type = _maybe_get(event, "type")
+
+        if event_type == "response.function_call_arguments.delta":
+            call_id = call_id or _maybe_get(event, "call_id")
+            chunk = _maybe_get(event, "arguments") or ""
+            call_args.append(chunk)
+            print("[function_call_arguments.delta]", chunk)
+        elif event_type == "response.function_call_arguments.done":
+            print("[function_call_arguments.done] call_id=", _maybe_get(event, "call_id"))
+            break
+        elif event_type == "response.text.delta":
+            chunk = _maybe_get(event, "delta") or ""
+            text_chunks.append(chunk)
+            print("[text.delta]", chunk)
+        elif event_type == "response.text.done":
+            print("[text.done]")
+        elif event_type == "response.done":
+            print("[response.done]")
+            break
+        elif event_type == "error":
+            print("ERROR:", event)
+            break
+
+    call_json = "".join(call_args) if call_args else None
+    text_output = "".join(text_chunks) if text_chunks else None
+    return call_id, call_json, text_output
+
     async def initialise_session(
         self,
         *,
@@ -361,6 +410,11 @@ class PromptSequenceRunner:
             await self._connection.response.create(
                 **self._response_kwargs(response_instructions(prompt))
             )
+            call_id, args_json, text_output = await pump_until_done(self._connection)
+            print("FUNCTION CALL ID:", call_id)
+            print("ARGS JSON:", args_json)
+            if text_output:
+                print("TEXT OUTPUT:", text_output)
 
 
 async def demo_prompt_sequence() -> None:
@@ -447,6 +501,7 @@ __all__ = [
     "build_azure_response_params",
     "build_user_text_message",
     "PromptSequenceRunner",
+    "pump_until_done",
     "demo_prompt_sequence",
 ]
 
