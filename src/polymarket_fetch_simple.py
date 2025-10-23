@@ -4,9 +4,9 @@ This module implements the workflow described in the user instructions:
 
 1. Find a slug for the newest active event when `--slug` is not supplied.
 2. Enumerate the markets under the event and collect their `clobTokenIds`.
-3. Fetch the historical price series for each token and print the first
-   few samples, showing both the raw price (`p`) and the normalised
-   probability (`p / 10000`).
+3. Fetch the historical price series for each token using one minute
+   fidelity and export the rows to a CSV file. Each record includes the
+   raw price (`p`) and the normalised probability (`p / 10000`).
 
 Example usage
 -------------
@@ -25,8 +25,10 @@ performed when the expected data cannot be found.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, List
 
 import requests
@@ -119,7 +121,7 @@ def parse_token_ids(raw) -> List[str]:
     return []
 
 
-def get_price_history(token_id: str, *, interval: str = "max", fidelity: int = 60) -> List[PricePoint]:
+def get_price_history(token_id: str, *, interval: str = "max", fidelity: int = 1) -> List[PricePoint]:
     """Retrieve the price history for a token id."""
 
     params = {"market": token_id, "interval": interval, "fidelity": fidelity}
@@ -153,20 +155,20 @@ def iter_token_ids(markets: Iterable[dict]) -> Iterable[tuple[dict, List[str]]]:
             yield market, token_ids
 
 
-def format_price_point(point: PricePoint) -> str:
-    """Return a formatted string for a price point."""
-
-    return f"    ts={point.ts} p={point.price:.2f} prob={point.probability:.4f}"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch Polymarket price history")
     parser.add_argument("--slug", help="Event slug (auto-detected when omitted)")
     parser.add_argument(
         "--limit",
         type=int,
-        default=5,
-        help="Number of rows from each token history to display",
+        default=0,
+        help="Maximum number of rows from each token history (0 = all)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("polymarket_prices.csv"),
+        help="Destination CSV file for the collected price history",
     )
     args = parser.parse_args()
 
@@ -179,19 +181,51 @@ def main() -> None:
         raise RuntimeError("イベント配下のマーケットが見つかりませんでした")
 
     total_tokens = 0
+    csv_rows: List[dict] = []
     for market, token_ids in iter_token_ids(markets):
         question = market.get("question") or market.get("slug") or "(unknown market)"
-        print(f"\n[market] {question} :: token_ids={token_ids}")
+        market_slug = market.get("slug") or ""
 
         for token_id in token_ids:
             history = get_price_history(token_id)
             total_tokens += 1
-            print(f"  [token] {token_id}  points={len(history)}")
-            for point in history[: args.limit]:
-                print(format_price_point(point))
+            limit = args.limit if args.limit and args.limit > 0 else len(history)
+            for point in history[:limit]:
+                csv_rows.append(
+                    {
+                        "event_slug": slug,
+                        "market_question": question,
+                        "market_slug": market_slug,
+                        "token_id": token_id,
+                        "timestamp": point.ts,
+                        "price": point.price,
+                        "probability": round(point.probability, 4),
+                    }
+                )
 
     if total_tokens == 0:
         raise RuntimeError("token_id（clobTokenIds）が見つかりませんでした")
+
+    if not csv_rows:
+        raise RuntimeError("価格履歴が取得できませんでした")
+
+    fieldnames = [
+        "event_slug",
+        "market_question",
+        "market_slug",
+        "token_id",
+        "timestamp",
+        "price",
+        "probability",
+    ]
+    with args.output.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    print(
+        f"[info] wrote {len(csv_rows)} rows from {total_tokens} tokens to {args.output.resolve()}"
+    )
 
 
 if __name__ == "__main__":
