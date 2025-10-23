@@ -9,3 +9,4 @@ ragas
 datasets
 openai
 jupyter
+pytest
