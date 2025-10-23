@@ -1,5 +1,4 @@
 """Utilities and orchestration helpers for Voice Live Realtime tools.
-
 This module provides a minimal, dependency-light sample that demonstrates how to
 prepare the payloads required by Azure Voice Live Realtime when working with
 tool calls.  The code is structured so that multiple tools can be registered in
@@ -31,10 +30,30 @@ payload into ``ResponseCreateParams`` for direct use.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
+
+LOG_LEVEL = os.getenv("AZURE_AGENTSDK_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
 
 try:  # pragma: no cover - exercised via monkeypatched tests
     from azure.ai.voicelive.models import ToolChoiceLiteral as AzureToolChoiceLiteral
@@ -102,8 +121,10 @@ def build_tools_payload(tools: Iterable[FunctionToolSpec]) -> List[Dict[str, Any
     """
 
     payload = [tool.as_payload() for tool in tools]
+    logger.debug("Converted %d tool specs into payload entries", len(payload))
     if not payload:
         raise ValueError("At least one tool must be provided for the sample.")
+    logger.debug("Tool payload validation succeeded")
     return payload
 
 
@@ -120,6 +141,12 @@ def build_response_payload(
     presence of the critical ``"type": "function"`` field.
     """
 
+    logger.debug(
+        "Building response payload | tool_choice=%s modalities=%s",
+        tool_choice,
+        list(modalities) if modalities is not None else None,
+    )
+
     payload: MutableMapping[str, Any] = {
         "instructions": instructions,
         "tools": build_tools_payload(tool_specs),
@@ -127,6 +154,7 @@ def build_response_payload(
     }
     if modalities is not None:
         payload["modalities"] = list(modalities)
+    logger.debug("Response payload built with keys: %s", list(payload.keys()))
     return dict(payload)
 
 
@@ -164,9 +192,12 @@ def build_azure_response_params(payload: Mapping[str, Any]) -> Any:
     instances that the websocket client can send.
     """
 
+    logger.debug("Attempting to build Azure SDK response params")
+
     try:
         from azure.ai.voicelive.models import FunctionTool, ResponseCreateParams, ToolType
     except ModuleNotFoundError as exc:  # pragma: no cover - requires SDK at runtime
+        logger.warning("azure-ai-voicelive SDK not available: %s", exc)
         raise RuntimeError(
             "azure-ai-voicelive is required at runtime to build SDK objects"
         ) from exc
@@ -181,7 +212,7 @@ def build_azure_response_params(payload: Mapping[str, Any]) -> Any:
                 parameters=tool["function"]["parameters"],
             )
         )
-
+    logger.debug("Created %d Azure FunctionTool instances", len(sdk_tools))
     return ResponseCreateParams(
         instructions=payload["instructions"],
         tools=sdk_tools,
@@ -201,8 +232,10 @@ def build_user_text_message(text: str) -> Any:
     try:  # pragma: no cover - exercised only when SDK is installed
         from azure.ai.voicelive.models import InputTextContentPart, UserMessageItem
 
+        logger.debug("Building UserMessageItem via Azure SDK")
         return UserMessageItem(content=[InputTextContentPart(text=text)])
     except ModuleNotFoundError:  # pragma: no cover - executed inside tests without SDK
+        logger.debug("Azure SDK not available; falling back to dict message payload")
         return {
             "type": "message",
             "role": "user",
@@ -247,6 +280,11 @@ class PromptSequenceRunner:
         self._tool_choice = tool_choice
         self._response_modalities = list(response_modalities) if response_modalities else None
         self._session_defaults: Dict[str, Any] = {}
+        logger.info(
+            "PromptSequenceRunner initialised | tool_choice=%s response_modalities=%s",
+            self._tool_choice,
+            self._response_modalities,
+        )
 
     def _response_kwargs(self, instructions: str) -> Mapping[str, Any]:
         payload = build_response_payload(
@@ -255,10 +293,17 @@ class PromptSequenceRunner:
             tool_choice=self._tool_choice,
             modalities=self._response_modalities,
         )
+        logger.debug(
+            "Constructed response payload for instructions snippet: %.60s",
+            instructions,
+        )
         try:
             response_obj = build_azure_response_params(payload)
         except RuntimeError:
+            logger.debug("Returning raw payload because SDK objects could not be built")
             response_obj = payload
+        else:
+            logger.debug("Returning Azure SDK ResponseCreateParams object")
         return {"response": response_obj}
 
     async def initialise_session(
@@ -282,10 +327,16 @@ class PromptSequenceRunner:
             for key, value in session_payload.items()
             if key != "instructions"
         }
+        logger.info(
+            "Updating session with instructions='%.40s...' and options=%s",
+            instructions,
+            list(self._session_defaults.keys()),
+        )
         await self._connection.session.update(session=session_payload)
 
     async def add_user_message(self, text: str) -> None:
         message = build_user_text_message(text)
+        logger.info("Adding user message: %.80s", text)
         await self._connection.conversation.item.create(item=message)
 
     async def cycle_session_prompts(
@@ -305,6 +356,7 @@ class PromptSequenceRunner:
         for prompt in prompts:
             session_payload = dict(self._session_defaults)
             session_payload["instructions"] = prompt
+            logger.info("Cycling session prompt: %.80s", prompt)
             await self._connection.session.update(session=session_payload)
             await self._connection.response.create(
                 **self._response_kwargs(response_instructions(prompt))
@@ -318,7 +370,9 @@ async def demo_prompt_sequence() -> None:
     api_key = os.getenv("AZURE_VOICELIVE_API_KEY")
     model = os.getenv("VOICELIVE_MODEL", "gpt-realtime")
 
+    logger.info("Starting demo prompt sequence")
     if not (endpoint and api_key):
+        logger.warning("Azure credentials missing; aborting realtime demo")
         raise RuntimeError(
             "Set AZURE_VOICELIVE_ENDPOINT and AZURE_VOICELIVE_API_KEY to run the demo"
         )
@@ -327,17 +381,20 @@ async def demo_prompt_sequence() -> None:
         from azure.ai.voicelive.aio import connect
         from azure.core.credentials import AzureKeyCredential
     except ModuleNotFoundError as exc:  # pragma: no cover - requires optional dependency
+        logger.error("azure-ai-voicelive dependency missing: %s", exc)
         raise RuntimeError(
             "azure-ai-voicelive must be installed to run the realtime demo"
         ) from exc
 
     prompts = ["Prompt A", "Prompt B", "Prompt C"]
+    logger.debug("Demo prompt sequence initialised with prompts: %s", prompts)
 
     async with connect(
         credential=AzureKeyCredential(api_key),
         endpoint=endpoint,
         model=model,
     ) as conn:
+        logger.info("Connected to Azure VoiceLive endpoint: %s", endpoint)
         runner = PromptSequenceRunner(conn, response_modalities=["text", "audio"])
         await runner.initialise_session(
             instructions="Initial prompt",
@@ -347,10 +404,39 @@ async def demo_prompt_sequence() -> None:
         )
         await runner.add_user_message("保険の契約内容を確認したいです。")
         await runner.cycle_session_prompts(prompts)
+        logger.info("Demo prompt sequence completed")
 
 
 def main() -> None:  # pragma: no cover - convenience entry point
-    asyncio.run(demo_prompt_sequence())
+    endpoint = os.getenv("AZURE_VOICELIVE_ENDPOINT")
+    api_key = os.getenv("AZURE_VOICELIVE_API_KEY")
+    model = os.getenv("VOICELIVE_MODEL", "gpt-realtime")
+
+    logger.debug(
+        "Main entry | endpoint=%s key_present=%s model=%s",
+        endpoint,
+        bool(api_key),
+        model,
+    )
+
+    if endpoint and api_key:
+        logger.info("Azure credentials detected; launching realtime demo")
+        asyncio.run(demo_prompt_sequence())
+        return
+
+    tool = build_decide_state_tool()
+    payload = build_response_payload(
+        instructions=(
+            "直近の会話ログを見て、進行段階(stage)、埋まった項目(filled)、"
+            "不足項目(missing)、次に話すべき文(next_prompt)を返答するJSONを返す"
+        ),
+        tool_specs=[tool],
+        modalities=["text", "audio"],
+    )
+    logger.info("Azure credentials missing; displaying sample payload instead")
+    print("Azure VoiceLive credentials were not found. Showing sample payload instead:")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print('Set AZURE_VOICELIVE_ENDPOINT and AZURE_VOICELIVE_API_KEY to run the realtime demo.')
 
 
 __all__ = [
@@ -364,3 +450,10 @@ __all__ = [
     "demo_prompt_sequence",
 ]
 
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
